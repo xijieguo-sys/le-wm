@@ -1,0 +1,38 @@
+# Hierarchical CEM solver (HWM paper Sec. 3.3). Drop-in for cfg.solver.
+# eval.py runs from repos/le-wm/, so the target uses a flat module path
+# (no le_wm package). model_low and model_high are injected by eval.py.
+
+_target_: planner.HierarchicalCEMSolver
+model_low: ???              # injected
+model_high: ???             # injected
+d_l: null                   # if null, planner reads it from model_high.d_l
+replan_high_every: 1
+advance_subgoal: false
+subgoal_threshold: null
+prior_weight: 0.1           # weight on the macro-action prior penalty (§1.4.2)
+history_size: 3             # MUST equal cfg.wm.history_size from training
+device: cuda
+seed: ${seed}
+
+# CEMSolver kwargs for the high-level instance (HWM Tab. 10, Push-T d=50).
+high_cfg:
+  num_samples: 1500
+  n_steps: 40
+  topk: 150                 # 10% elites
+  var_scale: 1.0
+  batch_size: 1
+
+# CEMSolver kwargs for the low-level instance (HWM Tab. 10).
+low_cfg:
+  num_samples: 900
+  n_steps: 20
+  topk: 90
+  var_scale: 1.0
+  batch_size: 1
+
+# PlanConfig kwargs for the high-level CEMSolver -- macro-actions aren't
+# blocked, so action_block=1.
+high_plan_cfg:
+  horizon: 4                # H = 4 macro-steps
+  receding_horizon: 1
+  action_block: 1

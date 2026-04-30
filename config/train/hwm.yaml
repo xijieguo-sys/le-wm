@@ -1,0 +1,85 @@
+# High-level world model training (HWM paper Eq. 1). Sibling of lewm.yaml.
+# train_highlevel.py loads cfg.low_level_ckpt (a frozen JEPA pickle) and
+# trains the macro-action encoder, the macro embedder, the new ARPredictor,
+# and a fresh pred_proj on top.
+
+defaults:
+  - _self_
+  - data: pusht_waypoints
+
+output_model_name: hwm
+subdir: ${hydra:job.id}
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+patch_size: 14
+encoder_scale: tiny
+dump_object: True
+
+# Path to the frozen low-level JEPA pickle (utils.py:55 torch.save).
+low_level_ckpt: ???
+
+trainer:
+  max_epochs: 500       # HWM Tab. 7 (Push-T)
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+loader:
+  batch_size: 64        # smaller than flat training: each item is N=5 frames
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 1e-4
+  weight_decay: 1e-3
+
+wandb:
+  enabled: True
+  config:
+    entity: lewm
+    project: lewm
+    name: ${output_model_name}
+    id: ${subdir}
+    resume: allow
+    log_model: False
+
+wm:
+  type: hwm
+  d_l: 10               # Push-T: matches HWM Tab. 10 (5 primitive 2-D actions)
+  history_size: 3       # K=3 high-level latents in P^(2)'s context
+                        # MUST equal predictor.num_frames in the predictor block.
+  num_preds: 1
+  embed_dim: 192        # MUST match the frozen encoder's projector out-dim
+  action_dim: 2         # primitive action dim (per env step). Push-T = 2.
+  share_pred_proj: false  # default: fresh trainable pred_proj (architecture §1.2)
+
+macro_encoder:
+  d_token: 64
+  n_layers: 2
+  n_heads: 4
+  mlp_head_dim: 128
+  max_blocks: 14        # MUST match data.waypoint_sampler.max_blocks
+  dropout: 0.1
+
+macro_prior:
+  ema_momentum: 0.99    # EMA coefficient for the macro_mean / macro_std buffers
+
+predictor:                # high-level ARPredictor (same shape as flat LeWM)
+  depth: 6
+  heads: 16
+  mlp_dim: 2048
+  dim_head: 64
+  dropout: 0.1
+  emb_dropout: 0.0
+
+loss:
+  distance: l1
+  teacher_force_weight: 1.0
+  rollout_weight: 0.0     # Push-T default per HWM Tab. 7

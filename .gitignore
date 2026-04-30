@@ -1,5 +1,8 @@
 __pycache__/
-environment.json
+environment*.json
 lightning_logs/
 outputs/
-requirements_frozen.txt
+requirements*.txt
+CLAUDE.md
+claude_outputs/
+tasks/

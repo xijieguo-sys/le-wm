@@ -283,3 +283,123 @@ class ARPredictor(nn.Module):
         x = self.dropout(x)
         x = self.transformer(x, c)
         return x
+
+
+class MacroActionEncoder(nn.Module):
+    """A_psi: variable-length action chunk -> macro-action latent l in R^{d_l}.
+
+    HWM paper Sec. 3.2 -- abstract action encoder. Compresses a chunk of
+    a_{t_k:t_{k+1}} primitive-action blocks into a single latent macro-action
+    via a transformer with a learnable CLS token + MLP head.
+
+    We do NOT reuse module.Block because Block.attn has no key-padding mask
+    and our chunks are right-padded to a fixed L_max. Inlining a 2-layer
+    masked self-attention stack keeps module.Block unchanged.
+    """
+
+    def __init__(
+        self,
+        input_dim,
+        d_l,
+        d_token=64,
+        n_layers=2,
+        n_heads=4,
+        mlp_head_dim=128,
+        max_blocks=14,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.d_l = d_l
+        self.d_token = d_token
+        self.n_heads = n_heads
+        self.head_dim = d_token // n_heads
+        self.dropout_p = float(dropout)
+        assert d_token % n_heads == 0, "d_token must be divisible by n_heads"
+
+        self.token_embed = nn.Linear(input_dim, d_token)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_token))
+        # +1 slot for the CLS token at index 0.
+        self.pos_embedding = nn.Parameter(torch.randn(1, max_blocks + 1, d_token) * 0.02)
+        self.dropout = nn.Dropout(dropout)
+
+        self.norm1 = nn.ModuleList([nn.LayerNorm(d_token) for _ in range(n_layers)])
+        self.norm2 = nn.ModuleList([nn.LayerNorm(d_token) for _ in range(n_layers)])
+        self.qkv = nn.ModuleList(
+            [nn.Linear(d_token, 3 * d_token, bias=False) for _ in range(n_layers)]
+        )
+        self.proj = nn.ModuleList(
+            [nn.Linear(d_token, d_token) for _ in range(n_layers)]
+        )
+        self.mlp = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(d_token, 4 * d_token),
+                    nn.GELU(),
+                    nn.Linear(4 * d_token, d_token),
+                    nn.Dropout(dropout),
+                )
+                for _ in range(n_layers)
+            ]
+        )
+
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_token),
+            nn.Linear(d_token, mlp_head_dim),
+            nn.SiLU(),
+            nn.Linear(mlp_head_dim, d_l),
+        )
+        # Zero-init head's last layer so initial macro-actions start near zero
+        # (mirrors AdaLN-zero pattern in ConditionalBlock).
+        nn.init.zeros_(self.head[-1].weight)
+        nn.init.zeros_(self.head[-1].bias)
+
+    def _attend(self, x, key_pad_mask, layer_idx):
+        """Single masked self-attention layer (no causal mask -- bidirectional).
+
+        x: (B, L+1, d_token)
+        key_pad_mask: (B, L+1) bool -- True where the slot is REAL (CLS + valid blocks).
+        """
+        B, T, D = x.shape
+        h = self.norm1[layer_idx](x)
+        qkv = self.qkv[layer_idx](h).chunk(3, dim=-1)
+        q, k, v = (rearrange(t, "b t (h d) -> b h t d", h=self.n_heads) for t in qkv)
+
+        # attn_mask: (B, 1, 1, T) -> -inf at padded keys so softmax ignores them.
+        # F.scaled_dot_product_attention accepts a float bias-style mask.
+        # Need to broadcast key_pad_mask to (B, 1, 1, T).
+        attn_bias = torch.zeros(B, 1, 1, T, dtype=x.dtype, device=x.device)
+        attn_bias.masked_fill_(~key_pad_mask[:, None, None, :], float("-inf"))
+
+        drop = self.dropout_p if self.training else 0.0
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_bias, dropout_p=drop, is_causal=False
+        )
+        out = rearrange(out, "b h t d -> b t (h d)")
+        x = x + self.proj[layer_idx](out)
+
+        h2 = self.norm2[layer_idx](x)
+        x = x + self.mlp[layer_idx](h2)
+        return x
+
+    def forward(self, actions, mask):
+        """
+        actions: (B, L, input_dim)  -- right-padded LeWM action blocks
+        mask:    (B, L) bool        -- True for REAL blocks, False for padded
+        returns: (B, d_l)
+        """
+        B, L, _ = actions.shape
+        x = self.token_embed(actions.float())  # (B, L, d_token)
+        cls = self.cls_token.expand(B, 1, -1)
+        x = torch.cat([cls, x], dim=1)  # (B, L+1, d_token); CLS at index 0
+        x = x + self.pos_embedding[:, : L + 1]
+        x = self.dropout(x)
+
+        # CLS slot is always valid; prepend True to the mask.
+        cls_mask = torch.ones(B, 1, dtype=torch.bool, device=mask.device)
+        key_pad_mask = torch.cat([cls_mask, mask], dim=1)  # (B, L+1)
+
+        for layer_idx in range(len(self.qkv)):
+            x = self._attend(x, key_pad_mask, layer_idx)
+
+        cls_out = x[:, 0]  # (B, d_token)
+        return self.head(cls_out)  # (B, d_l)

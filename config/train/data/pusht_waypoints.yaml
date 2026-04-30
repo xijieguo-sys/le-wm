@@ -1,0 +1,12 @@
+# Push-T waypoint training data. Inherits the base pusht config and adds the
+# variable-stride waypoint sampler (HWM paper Sec. 3.1; architecture §1.5).
+defaults:
+  - pusht
+  - _self_
+
+waypoint_sampler:
+  mode: variable        # 'variable' or 'fixed'
+  n_target: 5           # paper: N=5 waypoints per Push-T trajectory
+  min_blocks: 5         # 5 LeWM blocks * frameskip(5) = 25 env steps (paper min)
+  max_blocks: 14        # 14 LeWM blocks * frameskip(5) = 70 env steps (paper max)
+  stride: null          # only used when mode == 'fixed'
