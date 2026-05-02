@@ -22,7 +22,7 @@ dump_object: True
 low_level_ckpt: ???
 
 trainer:
-  max_epochs: 500       # HWM Tab. 7 (Push-T)
+  max_epochs: 100       # HWM Tab. 7 (Push-T)
   devices: auto
   accelerator: gpu
   precision: bf16

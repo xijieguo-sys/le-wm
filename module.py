@@ -348,10 +348,12 @@ class MacroActionEncoder(nn.Module):
             nn.SiLU(),
             nn.Linear(mlp_head_dim, d_l),
         )
-        # Zero-init head's last layer so initial macro-actions start near zero
-        # (mirrors AdaLN-zero pattern in ConditionalBlock).
-        nn.init.zeros_(self.head[-1].weight)
-        nn.init.zeros_(self.head[-1].bias)
+        # Use default Linear init -- A_psi is a generative head and must
+        # produce informative macro-actions from step 0 so the predictor
+        # sees a non-zero conditioning signal. (Earlier comment claimed an
+        # "AdaLN-zero" pattern; that only applies to residual modulation,
+        # not generative outputs. Zero-init caused training-time collapse:
+        # macro_std EMA decayed toward 1e-6 because A_psi never escaped 0.)
 
     def _attend(self, x, key_pad_mask, layer_idx):
         """Single masked self-attention layer (no causal mask -- bidirectional).
