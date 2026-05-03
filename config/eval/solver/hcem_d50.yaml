@@ -1,0 +1,33 @@
+# Hierarchical CEM for Push-T at goal-offset d=50 (HWM Tab. 10).
+_target_: planner.HierarchicalCEMSolver
+model_low: ???
+model_high: ???
+d_l: null
+replan_high_every: 1
+advance_subgoal: false
+subgoal_threshold: null
+prior_weight: 0.0
+history_size: 3
+device: cuda
+seed: ${seed}
+
+high_cfg:
+  num_samples: 1500
+  n_steps: 40
+  topk: 10
+  var_scale: 1.0
+  var_ema: 0.9              # Tab. 10: 0.9 high
+  batch_size: 1
+
+low_cfg:
+  num_samples: 900
+  n_steps: 20
+  topk: 10
+  var_scale: 1.0
+  var_ema: 0.8              # Tab. 10: 0.8 low
+  batch_size: 1
+
+high_plan_cfg:
+  horizon: 4                # H = 4 macro-steps
+  receding_horizon: 1
+  action_block: 1

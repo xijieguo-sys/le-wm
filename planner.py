@@ -25,6 +25,124 @@ import stable_worldmodel as swm
 from stable_worldmodel.solver import CEMSolver
 
 
+class VarEMACEMSolver(CEMSolver):
+    """CEMSolver with EMA smoothing on the per-iter sampling spread.
+
+    HWM paper Tab. 10's "Var EMA" column. The vanilla CEMSolver refits
+    `batch_var` to `topk_candidates.std(dim=1)` each iteration; this
+    subclass blends the new std with the previous one:
+
+        batch_var = var_ema * batch_var + (1 - var_ema) * elite_std
+
+    With var_ema = 0 this reduces to identical behavior. (`batch_var` is
+    used as `randn * batch_var + batch_mean`, so it is in fact a *std*
+    despite the upstream variable name.)
+    """
+
+    def __init__(self, *args, var_ema: float = 0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.var_ema = float(var_ema)
+
+    @torch.inference_mode()
+    def solve(
+        self, info_dict: dict, init_action: torch.Tensor | None = None
+    ) -> dict:
+        # Near-copy of swm CEMSolver.solve (installed package). Only the
+        # elite-refit step is modified to apply var_ema smoothing on the
+        # sampling spread.
+        start_time = time.time()
+        outputs = {'costs': [], 'mean': [], 'var': []}
+
+        mean, var = self.init_action_distrib(init_action)
+        mean = mean.to(self.device)
+        var = var.to(self.device)
+
+        total_envs = self.n_envs
+
+        for start_idx in range(0, total_envs, self.batch_size):
+            end_idx = min(start_idx + self.batch_size, total_envs)
+            current_bs = end_idx - start_idx
+
+            batch_mean = mean[start_idx:end_idx]
+            batch_var = var[start_idx:end_idx]
+
+            expanded_infos = {}
+            for k, v in info_dict.items():
+                v_batch = v[start_idx:end_idx]
+                if torch.is_tensor(v):
+                    v_batch = v_batch.unsqueeze(1)
+                    v_batch = v_batch.expand(
+                        current_bs, self.num_samples, *v_batch.shape[2:]
+                    )
+                elif isinstance(v, np.ndarray):
+                    v_batch = np.repeat(
+                        v_batch[:, None, ...], self.num_samples, axis=1
+                    )
+                expanded_infos[k] = v_batch
+
+            final_batch_cost = None
+            for step in range(self.n_steps):
+                candidates = torch.randn(
+                    current_bs, self.num_samples,
+                    self.horizon, self.action_dim,
+                    generator=self.torch_gen,
+                    device=self.device,
+                )
+                candidates = (
+                    candidates * batch_var.unsqueeze(1)
+                    + batch_mean.unsqueeze(1)
+                )
+                candidates[:, 0] = batch_mean
+                current_info = expanded_infos.copy()
+                costs = self.model.get_cost(current_info, candidates)
+
+                assert isinstance(costs, torch.Tensor), (
+                    f'Expected cost to be a torch.Tensor, got {type(costs)}'
+                )
+                assert (
+                    costs.ndim == 2
+                    and costs.shape[0] == current_bs
+                    and costs.shape[1] == self.num_samples
+                ), (
+                    f'Expected cost shape ({current_bs}, {self.num_samples}), '
+                    f'got {costs.shape}'
+                )
+
+                topk_vals, topk_inds = torch.topk(
+                    costs, k=self.topk, dim=1, largest=False
+                )
+                batch_indices = (
+                    torch.arange(current_bs, device=self.device)
+                    .unsqueeze(1)
+                    .expand(-1, self.topk)
+                )
+                topk_candidates = candidates[batch_indices, topk_inds]
+
+                # Refit. Mean updates fully to the elite mean; var (= std)
+                # is EMA-smoothed against the elite std per Tab. 10.
+                elite_std = topk_candidates.std(dim=1)
+                batch_mean = topk_candidates.mean(dim=1)
+                if self.var_ema > 0.0:
+                    batch_var = (
+                        self.var_ema * batch_var
+                        + (1.0 - self.var_ema) * elite_std
+                    )
+                else:
+                    batch_var = elite_std
+
+                final_batch_cost = topk_vals.mean(dim=1).cpu().tolist()
+
+            mean[start_idx:end_idx] = batch_mean
+            var[start_idx:end_idx] = batch_var
+            outputs['costs'].extend(final_batch_cost)
+
+        outputs['actions'] = mean.detach().cpu()
+        outputs['mean'] = [mean.detach().cpu()]
+        outputs['var'] = [var.detach().cpu()]
+        print(f'CEM solve time: {time.time() - start_time:.4f} seconds')
+        return outputs
+
+
 def _match_goal_shape(goal: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
     """Align `goal` to `pred`'s shape.
 
@@ -198,15 +316,16 @@ class HierarchicalCEMSolver:
             d_l = int(getattr(model_high, 'd_l'))
         self.d_l = int(d_l)
 
-        # Underlying CEMSolver instances. Each is wrapped in a cost adapter
-        # so they expose a clean get_cost contract over pre-cached latents.
-        self.solver_low = CEMSolver(
+        # Underlying CEM instances. We use VarEMACEMSolver (paper Tab. 10's
+        # Var EMA column); when var_ema is 0 or absent it behaves identically
+        # to vanilla CEMSolver, so old configs without var_ema still work.
+        self.solver_low = VarEMACEMSolver(
             model=SubgoalCostAdapter(model_low, history_size=self.history_size),
             device=device,
             seed=seed,
             **low_cfg,
         )
-        self.solver_high = CEMSolver(
+        self.solver_high = VarEMACEMSolver(
             model=HighLevelCostAdapter(model_high, prior_weight=prior_weight),
             device=device,
             seed=seed + 1,
