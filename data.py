@@ -76,13 +76,16 @@ class WaypointSubtrajectoryDataset(Dataset):
         self.action_normalizer = action_normalizer
         self.pixel_transform = pixel_transform
 
-        # Episode must fit a segment of length min_blocks AND accommodate
-        # N distinct waypoint INDICES (positions 0..N-1, hence T_blocks >= N
-        # blocks total -- not just N-1, otherwise the fallback path can
-        # generate t[-1] = N-1 outside the valid index range when min_blocks
-        # < N-1). Take the larger of the two bounds.
+        # Episode must accommodate (a) a segment of length L >= min_blocks,
+        # which spans L+1 distinct block positions [s, s+L] and so requires
+        # T_blocks >= min_blocks + 1, AND (b) N distinct waypoint indices,
+        # which requires T_blocks >= N. Take the larger of the two bounds.
+        # Without the +1 on min_blocks, T_blocks = min_blocks episodes hit
+        # the sampler's fallback path and silently violate the user-stated
+        # min_blocks lower bound (e.g. Push-T config user says min L=5 but
+        # the sampler returns L=4 for T_blocks=5 episodes).
         if mode == 'variable':
-            min_blocks_required = max(self.min_blocks, self.n_target)
+            min_blocks_required = max(self.min_blocks + 1, self.n_target)
         elif mode == 'fixed':
             assert self.stride is not None, "fixed mode needs stride"
             min_blocks_required = (self.n_target - 1) * self.stride + 1
