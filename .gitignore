@@ -5,3 +5,6 @@ outputs/
 requirements*.txt
 CLAUDE.md
 tasks/
+lewm/
+wandb/
+slurm_logs/

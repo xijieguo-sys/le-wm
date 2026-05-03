@@ -119,10 +119,12 @@ def hwm_forward(self, batch, stage, cfg):
     output['loss'] = L_tf
     output['macro_norm'] = l_raw.norm(dim=-1).mean()
     output['macro_std_mean'] = self.model.macro_std.mean()
+    output['macro_per_dim_std'] = l_raw.reshape(-1, l_raw.size(-1)).std(dim=0, unbiased=False).mean()
+
 
     log_dict = {
         f'{stage}/{k}': v.detach() for k, v in output.items()
-        if k in ('loss', 'L_tf', 'macro_norm', 'macro_std_mean')
+        if k in ('loss', 'L_tf', 'macro_norm', 'macro_per_dim_std', 'macro_std_mean')
     }
     self.log_dict(log_dict, on_step=True, sync_dist=True)
     return output
