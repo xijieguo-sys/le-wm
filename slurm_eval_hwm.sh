@@ -39,6 +39,8 @@ cd "${PROJECT_DIR}"
 # SLURM_JOB_NAME=bash works around Lightning's strict --ntasks validation
 # (lightning/fabric/plugins/environments/slurm.py:_validate_srun_variables).
 
-SLURM_JOB_NAME=bash "${VENV_PYTHON}" eval.py --config-name pusht_hwm \
+CONFIG_NAME="${CONFIG_NAME:-pusht_hwm}"
+
+SLURM_JOB_NAME=bash "${VENV_PYTHON}" eval.py --config-name "${CONFIG_NAME}" \
     policy="${DEFAULT_POLICY}" \
     "$@"

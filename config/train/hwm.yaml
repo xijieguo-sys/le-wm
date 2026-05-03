@@ -53,7 +53,14 @@ wandb:
 wm:
   type: hwm
   d_l: 10               # Push-T: matches HWM Tab. 10 (5 primitive 2-D actions)
-  history_size: 3       # K=3 high-level latents in P^(2)'s context
+  history_size: 4       # K=4 high-level latents in P^(2)'s context. Paper Tab. 7
+                        # high-level T=5 capacity; 4 is the max useful with N=5
+                        # waypoints (L=5 has no valid target at N=5).
+                        # NOTE: this is the HIGH-level model context. The
+                        # `history_size` in config/eval/solver/hcem*.yaml is
+                        # SEPARATE -- it controls the LOW-level rollout window
+                        # via SubgoalCostAdapter and must stay aligned with
+                        # LeWM's training (currently 3).
                         # MUST equal predictor.num_frames in the predictor block.
   num_preds: 1
   embed_dim: 192        # MUST match the frozen encoder's projector out-dim
