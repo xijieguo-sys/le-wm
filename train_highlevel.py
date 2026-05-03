@@ -105,10 +105,9 @@ def hwm_forward(self, batch, stage, cfg):
 
     pred_all = torch.cat(pred_chunks, dim=0)
     tgt_all = torch.cat(tgt_chunks, dim=0)
-    # HWM Eq. 1 is the L1 norm summed over D; we mean over D as well so the
-    # loss magnitude (~1) matches LeWM's MSE under shared lr/grad-clip.
-    # Argmin is unchanged; CEM cost adapters keep the sum form for ranking.
-    L_tf = (pred_all - tgt_all.detach()).abs().mean()
+    # HWM Eq. 1 (paper Sec. 2.5): L_tf = (1/N) Σ_k ‖ẑ - z‖₁ where ‖·‖₁ sums
+    # over D. Sum over the last dim, mean over the batch dim.
+    L_tf = (pred_all - tgt_all.detach()).abs().sum(-1).mean()
 
     # 4. EMA update for the macro-action prior buffers (used at planning
     #    time by HierarchicalCEMSolver to seed CEM and weight the prior

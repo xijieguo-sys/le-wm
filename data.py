@@ -1,9 +1,22 @@
 """WaypointSubtrajectoryDataset: variable-stride waypoint sampler over HDF5.
 
-HWM paper Sec. 3.1 -- the high-level world model trains on
-(z_{t_k}, a_{t_k:t_{k+1}}, z_{t_{k+1}}) triples sampled at variable stride.
-Each __getitem__ samples N waypoint LeWM-block indices from one episode
-and returns padded action chunks for the inter-waypoint transitions.
+HWM paper App. B.3 (Push-T):
+  > "To construct training sequences, we subsample trajectory segments
+  > with lengths uniformly drawn between 25 and 70 timesteps. From each
+  > segment, we sample N = 5 waypoint states, which define the high-level
+  > transitions."
+
+Each __getitem__:
+  1. picks a random episode,
+  2. samples a segment length L in LeWM blocks ~ Uniform(min_blocks, max_blocks),
+  3. samples a start offset s ~ Uniform(0, T_blocks - L),
+  4. anchors t_1 = s, t_N = s + L (so the sampled-segment length is exact),
+  5. samples N-2 middle waypoints uniformly from (s+1, ..., s+L-1) without
+     replacement (matches the paper's Franka recipe of "middle waypoint
+     sampled uniformly", generalised to N=5 for Push-T).
+
+The {min,max}_blocks bounds are LeWM blocks; multiply by frameskip to get
+env-step lengths (Push-T: 5..14 blocks = 25..70 env steps).
 
 Wraps `swm.data.HDF5Dataset` -- we use its `_load_slice` to read raw env
 steps and reshape actions into LeWM blocks (one block = `frameskip` env
@@ -24,8 +37,10 @@ class WaypointSubtrajectoryDataset(Dataset):
         base: an `swm.data.HDF5Dataset` (or any subclass exposing `lengths`,
             `offsets`, `frameskip`, and `_load_slice(ep, start, end)`).
         n_target: target number of waypoints per item (HWM Push-T = 5).
-        min_blocks, max_blocks: variable-stride bounds in LeWM blocks
-            (Push-T: 5--14, matching paper's 25--70 env steps at frameskip 5).
+        min_blocks, max_blocks: SEGMENT-length bounds in LeWM blocks
+            (Push-T: 5..14 blocks = 25..70 env steps at frameskip 5).
+            The N waypoints are placed *inside* a sampled segment of this
+            length, so the average inter-waypoint gap is L/(N-1).
         mode: 'variable' (paper recipe) or 'fixed' (HWM_PLDM-style sanity).
         stride: required when mode='fixed'.
         action_normalizer: optional callable applied to each action chunk
@@ -61,10 +76,11 @@ class WaypointSubtrajectoryDataset(Dataset):
         self.action_normalizer = action_normalizer
         self.pixel_transform = pixel_transform
 
-        # Episode is valid if it can fit at least N waypoints with the
-        # *minimum* stride between each (gives a lower bound on length).
+        # Episode must fit a segment of length min_blocks AND accommodate
+        # N distinct waypoint indices in it (which needs at least N-1 blocks
+        # for the waypoint span). Take the larger of the two bounds.
         if mode == 'variable':
-            min_blocks_required = (self.n_target - 1) * self.min_blocks + 1
+            min_blocks_required = max(self.min_blocks, self.n_target - 1)
         elif mode == 'fixed':
             assert self.stride is not None, "fixed mode needs stride"
             min_blocks_required = (self.n_target - 1) * self.stride + 1
@@ -92,10 +108,12 @@ class WaypointSubtrajectoryDataset(Dataset):
     def _sample_waypoints(self, T_blocks: int, rng) -> list[int]:
         """Sample exactly n_target LeWM-block waypoint indices [t_1, ..., t_N].
 
-        Guarantees N waypoints by clamping the per-episode max gap so the
-        full sequence always fits: max_eff = min(max_blocks, (T-1) // (N-1)).
-        For short episodes this narrows the stride distribution; for long
-        ones it leaves the user-specified [min, max] range intact.
+        HWM paper App. B.3 (Push-T) recipe:
+          1. L ~ Uniform(min_blocks, max_blocks)   -- segment length in blocks
+          2. s ~ Uniform(0, T_blocks - 1 - L)      -- start offset in episode
+          3. anchor t_1 = s, t_N = s + L           -- so segment span = L exactly
+          4. sample N-2 middle waypoints uniformly from (s+1, ..., s+L-1)
+             without replacement
         """
         N = self.n_target
 
@@ -107,17 +125,29 @@ class WaypointSubtrajectoryDataset(Dataset):
             )
             return [int(x) for x in t]
 
-        # variable stride; HWM paper recipe (architecture proposal §1.5)
-        max_eff = min(self.max_blocks, (T_blocks - 1) // (N - 1))
-        if max_eff < self.min_blocks:
-            # Episode too short for [min,max] -- collapse to fixed min spacing.
-            return [k * self.min_blocks for k in range(N)]
+        # 1. Sample segment length L in LeWM blocks.
+        #    Cap by (a) the episode's available range and (b) the minimum
+        #    required to fit N distinct waypoint indices.
+        max_eff = min(self.max_blocks, T_blocks - 1)
+        min_eff = max(self.min_blocks, N - 1)
+        if max_eff < min_eff:
+            # Pathological short-episode fallback. Use whatever fits.
+            L = max(N - 1, min(T_blocks - 1, self.min_blocks))
+        else:
+            L = int(rng.integers(min_eff, max_eff + 1))
 
-        t = [0]
-        for _ in range(N - 1):
-            gap = int(rng.integers(self.min_blocks, max_eff + 1))
-            t.append(t[-1] + gap)
-        return t
+        # 2. Sample start offset s within the episode.
+        max_s = T_blocks - 1 - L
+        s = int(rng.integers(0, max_s + 1)) if max_s > 0 else 0
+
+        # 3-4. Anchor first/last waypoint at segment endpoints; sample the
+        # N-2 middle indices from the open interior (s+1, ..., s+L-1).
+        if N - 2 > 0:
+            interior = np.arange(s + 1, s + L, dtype=np.int64)
+            middle = sorted(rng.choice(interior, size=N - 2, replace=False).tolist())
+        else:
+            middle = []
+        return [s] + [int(x) for x in middle] + [s + L]
 
     def __getitem__(self, idx: int):
         ep = int(self.valid_episodes[idx])

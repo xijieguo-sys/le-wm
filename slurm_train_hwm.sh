@@ -33,6 +33,11 @@ cd "${PROJECT_DIR}"
 # The override is *inside* the python invocation only; sbatch still names the
 # job "hwm_train" for its own bookkeeping.
 
+
+RUN_ID="hwm_${SLURM_JOB_ID}"
+
 SLURM_JOB_NAME=bash "${VENV_PYTHON}" train_highlevel.py \
     low_level_ckpt="${LOW_LEVEL_CKPT}" \
+    wandb.config.id="${RUN_ID}" \
+    wandb.config.name="${RUN_ID}" \
     "$@"
