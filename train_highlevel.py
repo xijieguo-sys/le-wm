@@ -52,10 +52,14 @@ def _build_action_norm(dataset):
 def hwm_forward(self, batch, stage, cfg):
     """Per-batch forward for high-level training.
 
-    HWM paper Eq. 1: L_tf = (1/N) sum_k |z_hat_{t_{k+1}} - z_{t_{k+1}}|_1.
-    Implemented via prefix-length sliding-window sampling so the predictor
-    sees every context length L in {1, ..., HS} during training and the
-    inference rollout's first HS-1 steps are not OOD (architecture §5.2).
+    HWM paper Eq. 1:  L_tf = (1/N) sum_k |z_hat_{t_{k+1}} - z_{t_{k+1}}|_1
+    where ẑ_{t_{k+1}} := P^(2)((l_{t_i}, z_{t_i})_{i≤k}).
+
+    Implemented as a single parallel ARPredictor call over all N-1 transitions:
+    feed (z_W[:, :N-1], e_l) and read off (B, N-1, D) predictions. ARPredictor's
+    causal self-attention (module.py:75-85, is_causal=True) ensures output
+    position k attends only to inputs i≤k -- so each prediction sees prefix
+    length k+1 automatically. Same training pattern as flat LeWM (train.py:33).
     """
     HS = cfg.wm.history_size
 
@@ -71,46 +75,27 @@ def hwm_forward(self, batch, stage, cfg):
 
     B, N, D = z_W.shape
 
-    # 2. Per-item prefix-length sampling.
-    #    L_b ~ Uniform{1, ..., HS}; t_b ~ Uniform{L_b, ..., N-1}.
-    device = z_W.device
-    L_b = torch.randint(1, HS + 1, (B,), device=device)  # in [1, HS]
-    # Per-item upper bound for t_b is N-1 (inclusive); lower bound is L_b.
-    t_low = L_b
-    t_high = torch.full((B,), N - 1, device=device)
-    span = (t_high - t_low + 1).clamp_min(1)
-    t_b = t_low + (torch.rand(B, device=device) * span).long().clamp_max(span - 1)
+    # 2. Sanity guard: ARPredictor.pos_embedding has only HS slots, so a
+    #    parallel forward over N-1 positions requires HS >= N-1. With the
+    #    Push-T defaults (n_target=5, history_size=4) this is exactly tight.
+    if N - 1 > HS:
+        raise ValueError(
+            f'wm.history_size ({HS}) must be >= n_target - 1 ({N - 1}) '
+            f'for parallel HWM training. Increase wm.history_size or '
+            f'reduce data.waypoint_sampler.n_target.'
+        )
 
-    # 3. Per-length batching. Group items by L, forward each group separately.
-    pred_chunks, tgt_chunks = [], []
-    for L in range(1, HS + 1):
-        sel = (L_b == L).nonzero(as_tuple=True)[0]
-        # Skip empty groups; also skip G=1 -- pred_proj's BatchNorm1d would
-        # crash with "Expected more than 1 value per channel". Real training
-        # batch=64 with HS=3 gives expected G ≈ 21 per group; G=1 only
-        # arises with very small val batches.
-        if sel.numel() < 2:
-            continue
-        b_sel = sel                                 # (G,)
-        t_sel = t_b[sel]                            # (G,)
-        # positions to gather: (G, L)
-        positions = (t_sel.unsqueeze(1) - L) + torch.arange(L, device=device)
-        z_ctx = z_W[b_sel.unsqueeze(1), positions]   # (G, L, D)
-        e_ctx = e_l[b_sel.unsqueeze(1), positions]   # (G, L, D)
-        z_tgt = z_W[b_sel, t_sel]                    # (G, D)
-
-        pred = self.model.predict(z_ctx, e_ctx)[:, -1]  # (G, D)
-        pred_chunks.append(pred)
-        tgt_chunks.append(z_tgt)
-
-    pred_all = torch.cat(pred_chunks, dim=0)
-    tgt_all = torch.cat(tgt_chunks, dim=0)
-    # Normalised form: mean over both batch and D. Paper Eq. 1 sums over D
+    # 3. Parallel teacher-forced loss over all N-1 transitions (paper Eq. 1).
+    ctx_emb = z_W[:, : N - 1]                       # (B, N-1, D)
+    ctx_act = e_l                                    # (B, N-1, D)
+    tgt_emb = z_W[:, 1:]                             # (B, N-1, D)
+    pred = self.model.predict(ctx_emb, ctx_act)     # (B, N-1, D)
+    # Normalised form: mean over (B, N-1, D). Paper sums over D
     # ((1/N) Σ_k ‖ẑ - z‖₁); we additionally mean over D so the loss
     # magnitude (~1) is comparable to LeWM's MSE and reads cleanly on the
     # wandb chart. Argmin is unchanged (Adam absorbs the constant rescale);
     # the CEM cost adapters keep the sum form for ranking.
-    L_tf = (pred_all - tgt_all.detach()).abs().mean()
+    L_tf = (pred - tgt_emb.detach()).abs().mean()
 
     # 4. EMA update for the macro-action prior buffers (used at planning
     #    time by HierarchicalCEMSolver to seed CEM and weight the prior

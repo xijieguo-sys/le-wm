@@ -61,11 +61,12 @@ def _build_tiny_jepa(embed_dim: int = 192, action_dim: int = 10):
                 projector=projector, pred_proj=pred_proj)
 
 
-def _build_tiny_hwm(jepa: JEPA, d_l: int = 10, action_block: int = 10):
+def _build_tiny_hwm(jepa: JEPA, d_l: int = 10, action_block: int = 10,
+                     history_size: int = 4):
     macro_encoder = MacroActionEncoder(input_dim=action_block, d_l=d_l, max_blocks=14)
     macro_embedder = nn.Linear(d_l, 192)
     predictor = ARPredictor(
-        num_frames=3, input_dim=192, hidden_dim=192, output_dim=192,
+        num_frames=history_size, input_dim=192, hidden_dim=192, output_dim=192,
         depth=2, heads=4, mlp_dim=512, dim_head=64,
         dropout=0.0, emb_dropout=0.0,
     )
@@ -74,7 +75,7 @@ def _build_tiny_hwm(jepa: JEPA, d_l: int = 10, action_block: int = 10):
         encoder=jepa.encoder, projector=jepa.projector,
         macro_encoder=macro_encoder, macro_embedder=macro_embedder,
         predictor=predictor, pred_proj=pred_proj,
-        d_l=d_l, history_size=3,
+        d_l=d_l, history_size=history_size,
     )
 
 
@@ -235,39 +236,36 @@ class Test06EncodeAndCacheNoMutation(unittest.TestCase):
         self.assertNotIn('goal_emb', info_in)
 
 
-class Test07PrefixLengthCoverage(unittest.TestCase):
-    """hwm_forward must use every L in {1,...,HS} during training. Catches
-    regressions that would hardcode L=HS-only contexts and reintroduce the
-    inference-time train/eval mismatch (architecture proposal §5.2 step 4)."""
+class Test07AllTransitionsSupervised(unittest.TestCase):
+    """hwm_forward must call the predictor exactly once per batch with all
+    N-1 transitions in parallel (paper Eq. 1). Causal attention inside
+    ARPredictor (module.py:75-85, is_causal=True) gives prefix-length
+    coverage automatically. Catches regressions to single-target sampling
+    and verifies the N-1 <= HS guard fires when violated."""
 
-    def test_forward_hits_all_lengths(self):
+    def test_forward_calls_predict_once_with_full_sequence(self):
         from train_highlevel import hwm_forward
         from omegaconf import OmegaConf
-        from functools import partial
 
         torch.manual_seed(0)
         jepa = _build_tiny_jepa().eval()
-        hwm = _build_tiny_hwm(jepa).eval()
+        hwm = _build_tiny_hwm(jepa, history_size=4).eval()
 
-        # Instrument predict() so we can see which context lengths actually
-        # reach the predictor. We monkey-patch the predict method to record
-        # the second axis of its first arg before delegating.
-        seen_lengths = []
+        # Instrument predict() to record (call_count, input_seq_len).
+        calls = []
         original_predict = hwm.predict
 
         def instrumented_predict(emb, macro_emb):
-            seen_lengths.append(emb.size(1))
+            calls.append(tuple(emb.shape))
             return original_predict(emb, macro_emb)
 
         hwm.predict = instrumented_predict
 
         cfg = OmegaConf.create({
-            'wm': {'history_size': 3, 'd_l': 10},
+            'wm': {'history_size': 4, 'd_l': 10},
             'macro_prior': {'ema_momentum': 0.99},
         })
 
-        # Stand-in for the spt.Module wrapper; hwm_forward only reads
-        # self.model and self.log_dict.
         class _StubSelf:
             def __init__(self, m):
                 self.model = m
@@ -275,22 +273,49 @@ class Test07PrefixLengthCoverage(unittest.TestCase):
                 pass
         stub = _StubSelf(hwm)
 
-        torch.manual_seed(7)
-        # Run several batches with varying random state so all 3 lengths
-        # surface. With B=24, expected ~8 items per length each batch.
-        for _ in range(8):
-            batch = {
-                'pixels':         torch.rand(24, 5, 3, 224, 224),
-                'actions_chunk':  torch.randn(24, 4, 14, 10),
-                'actions_mask':   torch.ones(24, 4, 14, dtype=torch.bool),
-            }
-            hwm_forward(stub, batch, 'train', cfg)
+        B, N = 8, 5
+        batch = {
+            'pixels':        torch.rand(B, N, 3, 224, 224),
+            'actions_chunk': torch.randn(B, N - 1, 14, 10),
+            'actions_mask':  torch.ones(B, N - 1, 14, dtype=torch.bool),
+        }
+        hwm_forward(stub, batch, 'train', cfg)
 
-        # The instrumented predict should have been called with each
-        # context length 1, 2, and 3 across the 8 batches.
-        unique = set(seen_lengths)
-        self.assertEqual(unique, {1, 2, 3},
-                         f'expected all of {{1,2,3}} to appear; got {sorted(unique)}')
+        # Exactly one predict() call per batch, with shape (B, N-1, D).
+        self.assertEqual(len(calls), 1, f'expected 1 predict() call, got {len(calls)}')
+        self.assertEqual(calls[0], (B, N - 1, 192),
+                         f'expected predict input (B={B}, N-1={N-1}, D=192), got {calls[0]}')
+
+    def test_guard_fires_when_n_minus_1_exceeds_hs(self):
+        """If wm.history_size < N - 1, parallel forward would index past
+        the predictor's pos_embedding. The guard must reject this."""
+        from train_highlevel import hwm_forward
+        from omegaconf import OmegaConf
+
+        torch.manual_seed(0)
+        jepa = _build_tiny_jepa().eval()
+        hwm = _build_tiny_hwm(jepa, history_size=2).eval()  # too small for N=5
+
+        cfg = OmegaConf.create({
+            'wm': {'history_size': 2, 'd_l': 10},
+            'macro_prior': {'ema_momentum': 0.99},
+        })
+
+        class _StubSelf:
+            def __init__(self, m):
+                self.model = m
+            def log_dict(self, *args, **kwargs):
+                pass
+        stub = _StubSelf(hwm)
+
+        B, N = 4, 5  # N - 1 = 4 > HS = 2
+        batch = {
+            'pixels':        torch.rand(B, N, 3, 224, 224),
+            'actions_chunk': torch.randn(B, N - 1, 14, 10),
+            'actions_mask':  torch.ones(B, N - 1, 14, dtype=torch.bool),
+        }
+        with self.assertRaises(ValueError):
+            hwm_forward(stub, batch, 'train', cfg)
 
 
 class Test08IdentityRollout(unittest.TestCase):

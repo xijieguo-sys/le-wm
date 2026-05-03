@@ -16,7 +16,7 @@ replan_high_every: 1
 advance_subgoal: false
 subgoal_threshold: null
 prior_weight: 0.0           # paper has no macro-action prior; disabled
-history_size: 3             # MUST equal cfg.wm.history_size from training
+history_size: 3             
 device: cuda
 seed: ${seed}
 
