@@ -77,10 +77,12 @@ class WaypointSubtrajectoryDataset(Dataset):
         self.pixel_transform = pixel_transform
 
         # Episode must fit a segment of length min_blocks AND accommodate
-        # N distinct waypoint indices in it (which needs at least N-1 blocks
-        # for the waypoint span). Take the larger of the two bounds.
+        # N distinct waypoint INDICES (positions 0..N-1, hence T_blocks >= N
+        # blocks total -- not just N-1, otherwise the fallback path can
+        # generate t[-1] = N-1 outside the valid index range when min_blocks
+        # < N-1). Take the larger of the two bounds.
         if mode == 'variable':
-            min_blocks_required = max(self.min_blocks, self.n_target - 1)
+            min_blocks_required = max(self.min_blocks, self.n_target)
         elif mode == 'fixed':
             assert self.stride is not None, "fixed mode needs stride"
             min_blocks_required = (self.n_target - 1) * self.stride + 1
@@ -98,12 +100,37 @@ class WaypointSubtrajectoryDataset(Dataset):
                 f'with {min_blocks_required} blocks min'
             )
 
-        # Note: we do NOT seed a single rng -- DataLoader workers each get
-        # their own rng via torch's worker_init_fn / numpy seeding.
+        # Per-worker rng. Lazy-initialised on first __getitem__ call so
+        # each DataLoader worker has its own persistent rng that advances
+        # per call (avoids the seed-reuse bug under persistent_workers=True).
+        # If self._init_seed is set, the rng is seeded deterministically
+        # (mixed with worker_id); otherwise OS entropy is used at creation
+        # but the stream advances naturally per call.
         self._init_seed = seed
+        self._rng = None
 
     def __len__(self):
         return int(len(self.valid_episodes))
+
+    def _get_rng(self):
+        """Return the per-worker persistent rng, lazy-creating on first use.
+
+        Each DataLoader worker has its own copy of `self`, so this dict is
+        worker-local. The rng is created once per worker and advances
+        naturally as samples are drawn -- no per-call reseeding, so
+        successive epochs see fresh waypoints even with persistent_workers.
+        """
+        if self._rng is None:
+            worker_info = torch.utils.data.get_worker_info()
+            worker_id = worker_info.id if worker_info is not None else -1
+            if self._init_seed is not None:
+                # Mix the init seed with worker_id (×7919, a prime, avoids
+                # alignment between workers) so workers see different streams.
+                seed = (self._init_seed + worker_id * 7919) % (2 ** 31)
+                self._rng = np.random.default_rng(seed)
+            else:
+                self._rng = np.random.default_rng()
+        return self._rng
 
     def _sample_waypoints(self, T_blocks: int, rng) -> list[int]:
         """Sample exactly n_target LeWM-block waypoint indices [t_1, ..., t_N].
@@ -153,42 +180,30 @@ class WaypointSubtrajectoryDataset(Dataset):
         ep = int(self.valid_episodes[idx])
         T_blocks = int(self.lengths[ep]) // self.frameskip
 
-        # Per-call rng. Use torch.initial_seed() inside workers (Lightning
-        # advances this per-epoch and per-worker) so successive epochs sample
-        # different waypoints. Reproducible given the same Lightning seed.
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            base = torch.initial_seed()
-        elif self._init_seed is not None:
-            base = self._init_seed
-        else:
-            base = int(np.random.SeedSequence().entropy)
-        seed = (base + idx) % (2 ** 31)
-        rng = np.random.default_rng(seed)
+        # Persistent per-worker rng -- advances naturally per call so
+        # different epochs see different waypoint samples even when
+        # persistent_workers=True (no seed-reuse bug).
+        rng = self._get_rng()
         t = self._sample_waypoints(T_blocks, rng)
         N = len(t)
-        if N < 2:
-            # Pathological: degrade to a fixed-stride fallback so the loader
-            # doesn't crash. Should be rare given valid_episodes filter.
-            t = list(range(min(self.n_target, T_blocks)))
-            N = len(t)
+        # _sample_waypoints is built to always return exactly n_target indices
+        # given a non-trivial config + the validity filter; assert that loudly.
+        assert N == self.n_target, (
+            f'_sample_waypoints returned {N} waypoints, expected {self.n_target}'
+        )
 
         s_env = t[0] * self.frameskip
         e_env = (t[-1] + 1) * self.frameskip
         steps = self.base._load_slice(ep, s_env, e_env)
 
         # steps['pixels']: (t[-1] - t[0] + 1, C, H, W) -- already frameskipped.
+        # HDF5Dataset._load_slice always returns torch tensors (hdf5.py:93).
         pixels = steps['pixels']
         local_idx = [tk - t[0] for tk in t]
-        if torch.is_tensor(pixels):
-            waypoint_pixels = pixels[local_idx]
-        else:
-            waypoint_pixels = torch.as_tensor(np.asarray(pixels)[local_idx])
+        waypoint_pixels = pixels[local_idx]
 
         # steps['action']: (e_env - s_env, action_dim) -- raw env-step actions.
         raw_action = steps['action']
-        if not torch.is_tensor(raw_action):
-            raw_action = torch.as_tensor(np.asarray(raw_action))
         if self.action_normalizer is not None:
             raw_action = self.action_normalizer(raw_action)
 
