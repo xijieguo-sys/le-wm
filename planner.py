@@ -301,6 +301,7 @@ class HierarchicalCEMSolver:
         advance_subgoal: bool = False,
         subgoal_threshold: float | None = None,
         prior_weight: float = 0.1,
+        use_macro_prior_init: bool = False,
         history_size: int = 3,
         device: str | torch.device = 'cuda',
         seed: int = 1234,
@@ -310,6 +311,10 @@ class HierarchicalCEMSolver:
         self.replan_high_every = int(replan_high_every)
         self.advance_subgoal = bool(advance_subgoal)
         self.subgoal_threshold = subgoal_threshold
+        # When False (paper-faithful default): high-level CEM inits with
+        # zeros mean and yaml's var_scale. When True: inits from
+        # macro_mean / macro_std.mean() learned during training.
+        self.use_macro_prior_init = bool(use_macro_prior_init)
 
         # d_l can be read off the loaded high-level model checkpoint.
         if d_l is None:
@@ -510,24 +515,28 @@ class HierarchicalCEMSolver:
             'goal_emb': info_low['goal_emb'],
         }
 
-        # Init from the macro-action prior so CEM starts in the right region
-        # of R^{d_l} rather than at N(0, I). Architecture proposal §6.2:
-        # init_action = μ_l (mean) and var_scale ≈ σ_l (spread). CEMSolver
-        # only takes a scalar var_scale, so we use σ_l.mean() for the spread.
-        H_high = self.solver_high.horizon
-        mu = self.model_high.macro_mean.detach().to(self.device)
-        init_high = mu.view(1, 1, -1).expand(n_envs, H_high, self.d_l).contiguous()
+        if self.use_macro_prior_init:
+            # OPT-IN: init high-level CEM from the trained macro-action prior
+            # buffers (μ_l mean, σ_l.mean() var). Paper does NOT do this; this
+            # is an extension we expose for ablation. Setting use_macro_prior_init
+            # to True uses both μ_l and σ_l for the FIRST CEM iteration; later
+            # iterations refit from elites (with optional var_ema smoothing).
+            H_high = self.solver_high.horizon
+            mu = self.model_high.macro_mean.detach().to(self.device)
+            init_high = mu.view(1, 1, -1).expand(n_envs, H_high, self.d_l).contiguous()
+            sigma_scale = float(self.model_high.macro_std.mean().detach().cpu().item())
+            sigma_scale = max(sigma_scale, 1e-3)
+            prev_var_scale = self.solver_high.var_scale
+            self.solver_high.var_scale = sigma_scale
+            try:
+                high_out = self.solver_high.solve(info_high, init_action=init_high)
+            finally:
+                self.solver_high.var_scale = prev_var_scale
+        else:
+            # Paper-faithful: zeros mean, yaml var_scale. CEMSolver fills its
+            # mean tensor with zeros internally when init_action is None.
+            high_out = self.solver_high.solve(info_high)
 
-        # Override the high-level solver's var_scale per call so CEM starts
-        # with a spread that matches σ_l rather than the yaml default 1.0.
-        sigma_scale = float(self.model_high.macro_std.mean().detach().cpu().item())
-        sigma_scale = max(sigma_scale, 1e-3)  # safety: never zero
-        prev_var_scale = self.solver_high.var_scale
-        self.solver_high.var_scale = sigma_scale
-        try:
-            high_out = self.solver_high.solve(info_high, init_action=init_high)
-        finally:
-            self.solver_high.var_scale = prev_var_scale
         # high_out['actions']: (n_envs, H_high, d_l).
         l_seq = high_out['actions'].to(self.device)
 

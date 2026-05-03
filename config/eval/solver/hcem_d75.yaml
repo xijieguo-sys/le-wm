@@ -7,6 +7,7 @@ replan_high_every: 1
 advance_subgoal: false
 subgoal_threshold: null
 prior_weight: 0.0
+use_macro_prior_init: false
 history_size: 3
 device: cuda
 seed: ${seed}

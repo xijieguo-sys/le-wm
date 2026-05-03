@@ -15,7 +15,9 @@ d_l: null                   # if null, planner reads it from model_high.d_l
 replan_high_every: 1
 advance_subgoal: false
 subgoal_threshold: null
-prior_weight: 0.0           # paper has no macro-action prior; disabled
+prior_weight: 0.0           # paper has no macro-action cost penalty; disabled
+use_macro_prior_init: false # paper inits CEM at zeros + yaml var_scale; flip
+                            # to true to seed CEM from trained macro_mean/std
 history_size: 3             
 device: cuda
 seed: ${seed}

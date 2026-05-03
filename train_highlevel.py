@@ -100,7 +100,9 @@ def hwm_forward(self, batch, stage, cfg):
     # 4. EMA update for the macro-action prior buffers (used at planning
     #    time by HierarchicalCEMSolver to seed CEM and weight the prior
     #    penalty -- see planner.HighLevelCostAdapter.get_cost).
-    self.model.update_macro_prior(l_raw, momentum=cfg.macro_prior.ema_momentum)
+    #    Only update during training; validation should not mutate model state.
+    if stage == 'fit':
+        self.model.update_macro_prior(l_raw, momentum=cfg.macro_prior.ema_momentum)
 
     output['L_tf'] = L_tf
     output['loss'] = L_tf
