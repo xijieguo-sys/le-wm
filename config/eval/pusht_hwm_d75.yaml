@@ -1,18 +1,16 @@
 # Hierarchical Push-T eval at d=75. Long-horizon Tab. 2 sweep.
+# Low-level horizon (h=5, k=5) is inherited from pusht_hwm.yaml's plan_config
+# -- HWM Tab. 10 specifies low pred h = 5 across all d for hierarchical
+# Push-T (only the high-level pred H varies).
 
 defaults:
   - pusht_hwm
   - override solver: hcem_d75
   - _self_
 
-plan_config:
-  horizon: 15               # low-level pred 15 LeWM blocks = 75 env steps
-  receding_horizon: 15
-  action_block: 5
-
 eval:
   goal_offset_steps: 75
-  eval_budget: 150
+  eval_budget: 150              # env-step cap
 
 output:
   filename: pusht_hwm_d75_results.txt
