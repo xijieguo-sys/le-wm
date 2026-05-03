@@ -251,7 +251,9 @@ class HighLevelCostAdapter(nn.Module):
     outputs observed at training time (see HighLevelWorldModel buffers).
     """
 
-    def __init__(self, model_high: nn.Module, prior_weight: float = 0.1):
+    def __init__(self, model_high: nn.Module, prior_weight: float = 0.0):
+        # Default 0.0 = paper-faithful (no macro-action cost penalty). Set
+        # >0 to opt into the prior penalty as an ablation.
         super().__init__()
         self.wrapped = model_high
         self.prior_weight = float(prior_weight)
@@ -300,8 +302,8 @@ class HierarchicalCEMSolver:
         replan_high_every: int = 1,
         advance_subgoal: bool = False,
         subgoal_threshold: float | None = None,
-        prior_weight: float = 0.1,
-        use_macro_prior_init: bool = False,
+        prior_weight: float = 0.0,          # paper-faithful default; cost penalty off
+        use_macro_prior_init: bool = False, # paper-faithful default; CEM init at zeros
         history_size: int = 3,
         device: str | torch.device = 'cuda',
         seed: int = 1234,
