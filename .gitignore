@@ -1,0 +1,10 @@
+__pycache__/
+environment*.json
+lightning_logs/
+outputs/
+requirements*.txt
+CLAUDE.md
+tasks/
+lewm/
+wandb/
+slurm_logs/
