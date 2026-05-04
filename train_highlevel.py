@@ -146,6 +146,7 @@ def run(cfg):
         max_blocks=cfg.data.waypoint_sampler.max_blocks,
         mode=cfg.data.waypoint_sampler.mode,
         stride=cfg.data.waypoint_sampler.get('stride'),
+        samples_per_episode=cfg.data.waypoint_sampler.get('samples_per_episode', 1),
         action_normalizer=action_norm,
         pixel_transform=pixel_only,
         seed=cfg.seed,

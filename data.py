@@ -43,6 +43,12 @@ class WaypointSubtrajectoryDataset(Dataset):
             length, so the average inter-waypoint gap is L/(N-1).
         mode: 'variable' (paper recipe) or 'fixed' (HWM_PLDM-style sanity).
         stride: required when mode='fixed'.
+        samples_per_episode: how many distinct (random-segment) items to
+            emit per episode per epoch. Default 1. Bumping to e.g. 4
+            gives 4x more random-segment coverage of each trajectory per
+            epoch (each call samples a fresh random segment, so the 4 items
+            are not duplicates). Same trajectories, more variety per epoch;
+            wall-clock per epoch grows roughly linearly.
         action_normalizer: optional callable applied to each action chunk
             (raw (n_envsteps, action_dim) -> normalised same shape) before
             reshape into LeWM blocks. Mirrors the `get_column_normalizer`
@@ -60,6 +66,7 @@ class WaypointSubtrajectoryDataset(Dataset):
         max_blocks: int,
         mode: str = 'variable',
         stride: int | None = None,
+        samples_per_episode: int = 1,
         action_normalizer=None,
         pixel_transform=None,
         seed: int | None = None,
@@ -73,6 +80,7 @@ class WaypointSubtrajectoryDataset(Dataset):
         self.max_blocks = int(max_blocks)
         self.mode = mode
         self.stride = int(stride) if stride is not None else None
+        self.samples_per_episode = max(1, int(samples_per_episode))
         self.action_normalizer = action_normalizer
         self.pixel_transform = pixel_transform
 
@@ -113,7 +121,7 @@ class WaypointSubtrajectoryDataset(Dataset):
         self._rng = None
 
     def __len__(self):
-        return int(len(self.valid_episodes))
+        return int(len(self.valid_episodes)) * self.samples_per_episode
 
     def _get_rng(self):
         """Return the per-worker persistent rng, lazy-creating on first use.
@@ -180,7 +188,11 @@ class WaypointSubtrajectoryDataset(Dataset):
         return [s] + [int(x) for x in middle] + [s + L]
 
     def __getitem__(self, idx: int):
-        ep = int(self.valid_episodes[idx])
+        # idx is in [0, len(valid_episodes) * samples_per_episode).
+        # Map every samples_per_episode consecutive idx values to one episode;
+        # each one samples a fresh random segment (rng is per-call, so the
+        # samples_per_episode items from the same episode are different).
+        ep = int(self.valid_episodes[idx // self.samples_per_episode])
         T_blocks = int(self.lengths[ep]) // self.frameskip
 
         # Persistent per-worker rng -- advances naturally per call so

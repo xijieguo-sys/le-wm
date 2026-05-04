@@ -10,3 +10,5 @@ waypoint_sampler:
   min_blocks: 5         # 5 LeWM blocks * frameskip(5) = 25 env steps (paper min)
   max_blocks: 14        # 14 LeWM blocks * frameskip(5) = 70 env steps (paper max)
   stride: null          # only used when mode == 'fixed'
+  samples_per_episode: 4  # 4 distinct random segments per trajectory per epoch
+                          # (~74K items/epoch on Push-T vs 18.5K with default 1)
