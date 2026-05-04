@@ -139,24 +139,48 @@ def run(cfg):
     def pixel_only(x):
         return pixel_transform({'pixels': x})['pixels']
 
-    waypoints = WaypointSubtrajectoryDataset(
+    # Split at EPISODE granularity, not item granularity. With
+    # samples_per_episode > 1, a flat random_split on the expanded dataset
+    # would leak segments of the same trajectory across train and val
+    # (P(at least one of K items in val) = 1 - (1 - val_frac)^K, which is
+    # ~34% for K=4, val_frac=0.1). Episode-level split prevents that.
+    samples_per_ep_train = int(
+        cfg.data.waypoint_sampler.get('samples_per_episode', 1)
+    )
+    waypoint_kwargs = dict(
         base=base,
         n_target=cfg.data.waypoint_sampler.n_target,
         min_blocks=cfg.data.waypoint_sampler.min_blocks,
         max_blocks=cfg.data.waypoint_sampler.max_blocks,
         mode=cfg.data.waypoint_sampler.mode,
         stride=cfg.data.waypoint_sampler.get('stride'),
-        samples_per_episode=cfg.data.waypoint_sampler.get('samples_per_episode', 1),
         action_normalizer=action_norm,
         pixel_transform=pixel_only,
-        seed=cfg.seed,
     )
 
+    # Probe to discover the full set of valid episode indices.
+    probe = WaypointSubtrajectoryDataset(
+        **waypoint_kwargs, samples_per_episode=1, seed=cfg.seed,
+    )
+    all_eps = probe.valid_episodes.tolist()
+
     rnd_gen = torch.Generator().manual_seed(cfg.seed)
-    train_set, val_set = spt.data.random_split(
-        waypoints,
-        lengths=[cfg.train_split, 1 - cfg.train_split],
-        generator=rnd_gen,
+    perm = torch.randperm(len(all_eps), generator=rnd_gen).tolist()
+    n_train = int(cfg.train_split * len(all_eps))
+    train_eps = [all_eps[i] for i in perm[:n_train]]
+    val_eps = [all_eps[i] for i in perm[n_train:]]
+
+    train_set = WaypointSubtrajectoryDataset(
+        **waypoint_kwargs,
+        samples_per_episode=samples_per_ep_train,
+        episode_indices=train_eps,
+        seed=cfg.seed,
+    )
+    val_set = WaypointSubtrajectoryDataset(
+        **waypoint_kwargs,
+        samples_per_episode=1,        # one segment per val episode is plenty
+        episode_indices=val_eps,
+        seed=cfg.seed + 1,            # different stream from train
     )
 
     train = torch.utils.data.DataLoader(

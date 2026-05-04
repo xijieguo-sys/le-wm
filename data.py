@@ -49,6 +49,13 @@ class WaypointSubtrajectoryDataset(Dataset):
             epoch (each call samples a fresh random segment, so the 4 items
             are not duplicates). Same trajectories, more variety per epoch;
             wall-clock per epoch grows roughly linearly.
+        episode_indices: optional list/array of episode indices to restrict
+            the dataset to. When set, valid_episodes is built from this
+            subset (intersected with the length filter). Used by
+            train_highlevel.py to split TRAIN and VAL at episode
+            granularity -- a flat random_split AFTER samples_per_episode
+            expansion would leak segments of the same trajectory across
+            both splits.
         action_normalizer: optional callable applied to each action chunk
             (raw (n_envsteps, action_dim) -> normalised same shape) before
             reshape into LeWM blocks. Mirrors the `get_column_normalizer`
@@ -67,6 +74,7 @@ class WaypointSubtrajectoryDataset(Dataset):
         mode: str = 'variable',
         stride: int | None = None,
         samples_per_episode: int = 1,
+        episode_indices=None,
         action_normalizer=None,
         pixel_transform=None,
         seed: int | None = None,
@@ -101,10 +109,22 @@ class WaypointSubtrajectoryDataset(Dataset):
             raise ValueError(f'unknown mode {mode}')
         min_envsteps_required = min_blocks_required * self.frameskip
 
-        self.valid_episodes = np.array(
-            [ep for ep, L in enumerate(self.lengths) if L >= min_envsteps_required],
-            dtype=np.int64,
-        )
+        if episode_indices is not None:
+            # Restrict to the caller-provided subset; still apply the length
+            # filter to be safe (caller may pass dirty indices).
+            requested = {int(e) for e in episode_indices}
+            self.valid_episodes = np.array(
+                sorted(
+                    ep for ep in requested
+                    if int(self.lengths[ep]) >= min_envsteps_required
+                ),
+                dtype=np.int64,
+            )
+        else:
+            self.valid_episodes = np.array(
+                [ep for ep, L in enumerate(self.lengths) if L >= min_envsteps_required],
+                dtype=np.int64,
+            )
         if len(self.valid_episodes) == 0:
             raise ValueError(
                 f'No episodes long enough for {n_target} waypoints '
