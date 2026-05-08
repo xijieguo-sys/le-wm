@@ -1,0 +1,17 @@
+# Hierarchical Push-T eval at d=50. Long-horizon Tab. 2 sweep.
+# Low-level horizon (h=5, k=5) is inherited from pusht_hwm.yaml's plan_config
+# -- HWM Tab. 10 specifies low pred h = 5 across all d for hierarchical
+# Push-T (only the high-level pred H varies). The Tab. 9 single-level
+# numbers (h=10 at d=50) do NOT apply here.
+
+defaults:
+  - pusht_hwm
+  - override solver: hcem_d50
+  - _self_
+
+eval:
+  goal_offset_steps: 50
+  eval_budget: 100              # env-step cap; goal is at d=50 so allow 2x slack
+
+output:
+  filename: pusht_hwm_d50_results.txt

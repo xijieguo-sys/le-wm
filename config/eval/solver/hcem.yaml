@@ -1,0 +1,48 @@
+# Hierarchical CEM solver (HWM paper Sec. 3.3). Drop-in for cfg.solver.
+#
+# Default values match HWM Tab. 10 Push-T d=25 (matching the default
+# eval.goal_offset_steps in pusht_hwm.yaml). For d=50 / d=75, use the
+# matching pusht_hwm_d50 / pusht_hwm_d75 config which selects the
+# corresponding hcem_pusht_d{50,75} solver.
+#
+# eval.py runs from repos/le-wm/, so the target uses a flat module path
+# (no le_wm package). model_low and model_high are injected by eval.py.
+
+_target_: planner.HierarchicalCEMSolver
+model_low: ???              # injected
+model_high: ???             # injected
+d_l: null                   # if null, planner reads it from model_high.d_l
+replan_high_every: 1
+advance_subgoal: false
+subgoal_threshold: null
+prior_weight: 0.0           # paper has no macro-action cost penalty; disabled
+use_macro_prior_init: false # paper inits CEM at zeros + yaml var_scale; flip
+                            # to true to seed CEM from trained macro_mean/std
+history_size: 3             
+device: cuda
+seed: ${seed}
+
+# CEMSolver kwargs for the high-level instance (HWM Tab. 10, Push-T d=25).
+high_cfg:
+  num_samples: 900
+  n_steps: 20
+  topk: 10                  # # elites = 10 (Tab. 10)
+  var_scale: 1.0
+  var_ema: 0.0
+  batch_size: 1
+
+# CEMSolver kwargs for the low-level instance (HWM Tab. 10, Push-T d=25).
+low_cfg:
+  num_samples: 300
+  n_steps: 30
+  topk: 10
+  var_scale: 1.0
+  var_ema: 0.0
+  batch_size: 1
+
+# PlanConfig kwargs for the high-level CEMSolver -- macro-actions aren't
+# blocked, so action_block=1.
+high_plan_cfg:
+  horizon: 2                # H = 2 macro-steps (d=25)
+  receding_horizon: 1
+  action_block: 1

@@ -1,0 +1,12 @@
+# OGBench-Cube waypoint training data. Cube is a harder visual env; HWM paper
+# uses N=3 waypoints for Franka-like tasks. Tighter strides than Push-T.
+defaults:
+  - ogb
+  - _self_
+
+waypoint_sampler:
+  mode: variable
+  n_target: 3
+  min_blocks: 3         # ~15 env steps minimum
+  max_blocks: 12        # ~60 env steps maximum (loose upper bound)
+  stride: null

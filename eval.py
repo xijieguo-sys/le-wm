@@ -85,13 +85,41 @@ def run(cfg: DictConfig):
     policy = cfg.get("policy", "random")
 
     if policy != "random":
-        model = swm.policy.AutoCostModel(cfg.policy)
-        model = model.to("cuda")
-        model = model.eval()
-        model.requires_grad_(False)
-        model.interpolate_pos_encoding = True
-        config = swm.PlanConfig(**cfg.plan_config)
-        solver = hydra.utils.instantiate(cfg.solver, model=model)
+        # Detect hierarchical solvers (architecture proposal §6.1). Hierarchical
+        # solvers don't take a single `model` kwarg -- they take `model_low` /
+        # `model_high` and a separate high-level checkpoint via cfg.policy_high.
+        is_hierarchical = "Hierarchical" in str(cfg.solver._target_)
+
+        if is_hierarchical:
+            model_low = swm.policy.AutoCostModel(cfg.policy).to("cuda").eval()
+            model_low.requires_grad_(False)
+            model_low.interpolate_pos_encoding = True
+
+            model_high = swm.policy.AutoCostModel(cfg.policy_high).to("cuda").eval()
+            model_high.requires_grad_(False)
+            model_high.interpolate_pos_encoding = True
+
+            # Encoder/projector are shared at training time; share at load
+            # time too so we don't carry a duplicate ~5M-param ViT in memory
+            # and so the shared-latent invariant cannot drift.
+            if hasattr(model_high, 'encoder') and hasattr(model_low, 'encoder'):
+                model_high.encoder = model_low.encoder
+            if hasattr(model_high, 'projector') and hasattr(model_low, 'projector'):
+                model_high.projector = model_low.projector
+
+            config = swm.PlanConfig(**cfg.plan_config)
+            solver = hydra.utils.instantiate(
+                cfg.solver, model_low=model_low, model_high=model_high
+            )
+        else:
+            model = swm.policy.AutoCostModel(cfg.policy)
+            model = model.to("cuda")
+            model = model.eval()
+            model.requires_grad_(False)
+            model.interpolate_pos_encoding = True
+            config = swm.PlanConfig(**cfg.plan_config)
+            solver = hydra.utils.instantiate(cfg.solver, model=model)
+
         policy = swm.policy.WorldModelPolicy(
             solver=solver, config=config, process=process, transform=transform
         )
