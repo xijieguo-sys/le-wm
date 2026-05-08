@@ -1,4 +1,16 @@
+## Code and Scripts
 
+All code for this project is available on the `hierarchical-lewm` branch. Please reference the report for all technical details.
+
+The main Slurm scripts are:
+
+- `slurm_train_hwm.sh`: trains our Hierarchical LeWorldModel on Push-T.
+- `slurm_eval_hwm.sh`: evaluates our Hierarchical LeWorldModel on Push-T.
+- `slurm_train_lewm.sh`: trains the original LeWorldModel baseline.
+- `slurm_eval_lewm.sh`: evaluates the original LeWorldModel baseline.
+
+
+The code is built upon the original LeWorldModel codebase, so below is the README.md content from the original LeWorldModel repo.
 # LeWorldModel
 ### Stable End-to-End Joint-Embedding Predictive Architecture from Pixels
 
